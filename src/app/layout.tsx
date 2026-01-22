@@ -13,8 +13,26 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Plots',
-  description: 'Marque áreas dos seus talhões e salva em KML ou GeoJSON',
+  title: {
+    default: 'Plots - Desenho de Talhões',
+    template: '%s',
+  },
+  description:
+    'Ferramenta profissional para delimitação de talhões. Desenhe áreas com precisão no Google Maps e exporte seus dados instantaneamente nos formatos KML ou GeoJSON para uso em GPS e softwares de agricultura de precisão.',
+  metadataBase: new URL('https://plots.thegibi.dev'),
+  alternates: {
+    canonical: '/',
+    languages: {
+      'pt-BR': '/pt-BR',
+    },
+  },
+  appleWebApp: {
+    title: 'Plots',
+    statusBarStyle: 'default',
+  },
+  openGraph: {
+    images: '/og-image.png',
+  },
 };
 
 export default function RootLayout({
@@ -23,7 +41,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang={'pt-BR'}>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
