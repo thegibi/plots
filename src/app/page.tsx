@@ -247,7 +247,7 @@ export default function MapPage() {
           className="cursor-pointer"
         >
           <FaDownload className="mr-1" />
-          GEO
+          GeoJSON
         </Button>
         <Button
           onClick={handleClear}
