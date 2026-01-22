@@ -1,65 +1,262 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { Button } from '@/components/ui/button';
+import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
+import { useEffect, useRef, useState } from 'react';
+import { FaDownload } from 'react-icons/fa';
+
+type LatLng = { lat: number; lng: number };
+
+function downloadTextFile(
+  filename: string,
+  content: string,
+  mime = 'application/json',
+) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function polygonToGeoJSON(coords: LatLng[]) {
+  const ring = coords.length
+    ? [...coords, coords[0]].map((c) => [c.lng, c.lat])
+    : [];
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [ring],
+        },
+      },
+    ],
+  };
+}
+
+function polygonToKML(coords: LatLng[]) {
+  const closed = coords.length ? [...coords, coords[0]] : [];
+  const coordStr = closed.map((c) => `${c.lng},${c.lat},0`).join(' ');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Plot</name>
+    <Placemark>
+      <name>Plot Area</name>
+      <Style>
+        <LineStyle><width>2</width></LineStyle>
+        <PolyStyle><fill>1</fill></PolyStyle>
+      </Style>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>${coordStr}</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>`;
+}
+
+export default function MapPage() {
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!;
+  const mapDivRef = useRef<HTMLDivElement | null>(null);
+
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(
+    null,
+  );
+  const polygonRef = useRef<google.maps.Polygon | null>(null);
+
+  const [areaHa, setAreaHa] = useState<number | null>(null);
+  const [points, setPoints] = useState<LatLng[]>([]);
+  const defaultLocation: LatLng = { lat: -15.7801, lng: -47.9292 };
+  const [userLocation, setUserLocation] = useState<LatLng>(defaultLocation);
+
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setUserLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          });
+        },
+        (error) => {
+          console.log('Geolocation error:', error.message);
+          setUserLocation({ lat: -11.8707624, lng: -55.5475802 });
+        },
+        { enableHighAccuracy: true, timeout: 10000 },
+      );
+    }
+  }, []);
+
+  function updatePolygonData(
+    poly: google.maps.Polygon,
+    setPoints: React.Dispatch<React.SetStateAction<LatLng[]>>,
+    setAreaHa: React.Dispatch<React.SetStateAction<number | null>>,
+  ) {
+    const path = poly.getPath();
+    const coords: LatLng[] = [];
+    for (let i = 0; i < path.getLength(); i++) {
+      const p = path.getAt(i);
+      coords.push({ lat: p.lat(), lng: p.lng() });
+    }
+    setPoints(coords);
+
+    if (coords.length >= 3) {
+      const areaM2 = google.maps.geometry.spherical.computeArea(path);
+      setAreaHa(areaM2 / 10000);
+    } else {
+      setAreaHa(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!apiKey || !userLocation) return;
+
+    let cancelled = false;
+
+    setOptions({ key: apiKey, libraries: ['drawing', 'geometry'] });
+
+    (async () => {
+      const [mapsLib, drawingLib] = await Promise.all([
+        importLibrary('maps'),
+        importLibrary('drawing'),
+        importLibrary('geometry'),
+      ]);
+
+      if (cancelled) return;
+
+      const { Map } = mapsLib;
+      const { DrawingManager, OverlayType } =
+        drawingLib as google.maps.DrawingLibrary;
+
+      const map = new Map(mapDivRef.current!, {
+        center: userLocation,
+        zoom: 15,
+        mapTypeId: 'hybrid',
+        streetViewControl: false,
+        fullscreenControl: true,
+      });
+      mapRef.current = map;
+
+      const drawingManager = new DrawingManager({
+        drawingMode: OverlayType.POLYGON,
+        drawingControl: true,
+        drawingControlOptions: {
+          position: google.maps.ControlPosition.TOP_CENTER,
+          drawingModes: [OverlayType.POLYGON],
+        },
+        polygonOptions: {
+          editable: true,
+          draggable: false,
+        },
+      });
+      drawingManager.setMap(map);
+      drawingManagerRef.current = drawingManager;
+
+      google.maps.event.addListener(
+        drawingManager,
+        'overlaycomplete',
+        (e: google.maps.drawing.OverlayCompleteEvent) => {
+          if (e.type !== OverlayType.POLYGON) return;
+
+          if (polygonRef.current) polygonRef.current.setMap(null);
+
+          const poly = e.overlay as google.maps.Polygon;
+          polygonRef.current = poly;
+
+          drawingManager.setDrawingMode(null);
+
+          const update = () => updatePolygonData(poly, setPoints, setAreaHa);
+
+          update();
+          google.maps.event.addListener(poly.getPath(), 'set_at', update);
+          google.maps.event.addListener(poly.getPath(), 'insert_at', update);
+          google.maps.event.addListener(poly.getPath(), 'remove_at', update);
+        },
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+      if (polygonRef.current) polygonRef.current.setMap(null);
+      if (drawingManagerRef.current) drawingManagerRef.current.setMap(null);
+      mapRef.current = null;
+    };
+  }, [apiKey, userLocation]);
+
+  const handleClear = () => {
+    if (polygonRef.current) {
+      polygonRef.current.setMap(null);
+      polygonRef.current = null;
+    }
+    setPoints([]);
+    setAreaHa(null);
+    drawingManagerRef.current?.setDrawingMode(
+      google.maps.drawing.OverlayType.POLYGON,
+    );
+  };
+
+  const downloadGeoJSON = () => {
+    if (points.length < 3) return;
+    const geo = polygonToGeoJSON(points);
+    downloadTextFile(
+      'area.geojson',
+      JSON.stringify(geo, null, 2),
+      'application/geo+json',
+    );
+  };
+
+  const downloadKML = () => {
+    if (points.length < 3) return;
+    const kml = polygonToKML(points);
+    downloadTextFile('area.kml', kml, 'application/vnd.google-earth.kml+xml');
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="relative h-screen w-full">
+      <div ref={mapDivRef} className="h-full w-full" />
+
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-white/95 backdrop-blur-sm px-4 py-3 rounded-sm shadow-lg border border-gray-200">
+        <Button
+          onClick={downloadKML}
+          disabled={points.length < 3}
+          variant="default"
+          className="cursor-pointer"
+        >
+          <FaDownload className="mr-1" />
+          KML
+        </Button>
+        <Button
+          onClick={downloadGeoJSON}
+          disabled={points.length < 3}
+          variant="default"
+          className="cursor-pointer"
+        >
+          <FaDownload className="mr-1" />
+          GEO
+        </Button>
+        <Button
+          onClick={handleClear}
+          variant="destructive"
+          className="cursor-pointer"
+        >
+          Limpar
+        </Button>
+      </div>
     </div>
   );
 }
